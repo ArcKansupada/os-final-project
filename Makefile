@@ -86,6 +86,10 @@ UTCS_OPTS ?= -O3
 
 CFLAGS := ${UTCS_OPTS} -std=gnu18 -Wall -Werror @common.flags
 CCFLAGS := ${UTCS_OPTS} -std=gnu++23 -Wall -Werror @common.flags
+
+ifneq (${SYSCALL_TRACE},)
+CPPFLAGS += -DSYSCALL_TRACE
+endif
 LDFLAGS = \
     @common.flags \
     -nostdlib \
@@ -102,7 +106,9 @@ QEMU_TIMEOUT_CMD ?= timeout
 QEMU_DEBUG ?= # -d int
 
 QEMU_PREFER = ~gheith/public/tools26/bin/qemu-system-x86_64
-QEMU_CMD ?= ${shell (test -x ${QEMU_PREFER} && echo ${QEMU_PREFER}) || echo qemu-system-x86_64}
+
+QEMU_PREFER_LIB := ${shell echo ~gheith/public/tools26/lib}
+QEMU_CMD ?= ${shell (test -x ${QEMU_PREFER} && echo env LD_LIBRARY_PATH=${QEMU_PREFER_LIB}$${LD_LIBRARY_PATH:+:$$LD_LIBRARY_PATH} ${QEMU_PREFER}) || echo qemu-system-x86_64}
 
 QEMU_CONFIG_FLAGS = -accel ${QEMU_ACCEL} \
                     -machine q35 \
@@ -243,7 +249,7 @@ check_compiler:
 # two compilers don't mix)
 build/compiler: check_compiler
 	@mkdir -p build
-	@echo "${CXX} ${CXX_VERSION}" | cmp -s - $@ || echo "${CXX} ${CXX_VERSION}" > $@
+	@echo "${CXX} ${CXX_VERSION} ${CPPFLAGS}" | cmp -s - $@ || echo "${CXX} ${CXX_VERSION} ${CPPFLAGS}" > $@
 
 # if ccache is installed, CCACHE will be set to its path
 CCACHE ?= ${shell command -v ccache 2> /dev/null}

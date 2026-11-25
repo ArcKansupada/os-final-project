@@ -24,6 +24,10 @@
 #define SYS_munmap 11
 #define SYS_rt_sigaction 13
 #define SYS_rt_sigreturn 15
+#define SYS_ioctl 16
+#define SYS_dup 32
+#define SYS_dup2 33
+#define SYS_fcntl 72
 #define SYS_sched_yield 24
 #define SYS_nanosleep 35
 #define SYS_alarm 37

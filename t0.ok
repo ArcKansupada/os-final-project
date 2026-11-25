@@ -1,0 +1,21 @@
+*** t0 start
+ok: write of 0 bytes returns 0
+ok: read the console's input
+ok: read at the console's end of input returns 0
+ok: open /hello.txt
+ok: read /hello.txt
+ok: lseek then read
+ok: close
+ok: close again fails with EBADF
+ok: open a missing file fails with ENOENT
+ok: create /created.txt
+ok: write to it
+ok: read it back
+ok: close it
+ok: O_EXCL on an existing file fails with EEXIST
+ok: fork
+ok: waitpid
+ok: the child saw the file and exited 42
+ok: registers preserved across sched_yield
+ok: unknown system call fails with ENOSYS
+*** t0 passed

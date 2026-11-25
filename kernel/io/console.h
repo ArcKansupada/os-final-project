@@ -27,6 +27,10 @@ namespace Console {
 //   Q: Why not COM1? (what reads it while the machine boots?)
 extern sync<char> getch();
 
+extern sync<int> try_getch();
+
+extern bool readable();
+
 // Sends n characters, yielding while the port is busy.
 //   Q: Why hold the output mutex for all n, not one at a time?
 //   Q: Why a separate mutex from getch's?

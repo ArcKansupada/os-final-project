@@ -56,6 +56,19 @@ sync<char> Console::getch() {
   co_return ch;
 }
 
+sync<int> Console::try_getch() {
+  auto proof = co_await input;
+  if (eof) co_return '\4';
+  if (!proof.data().ready()) co_return -1;
+  char ch = proof.data().read();
+  if (ch == '\4') eof = true;
+  co_return (unsigned char)ch;
+}
+
+bool Console::readable() {
+  return __atomic_load_n(&eof, __ATOMIC_RELAXED) || (inb(LSR) & 0x01);
+}
+
 sync<void> Console::write(const char *chars, std::size_t n) {
   auto proof = co_await output; // not const: Proof::data() isn't
   for (std::size_t i = 0; i < n; i++) {

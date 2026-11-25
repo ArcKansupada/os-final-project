@@ -1,1 +1,15 @@
 .idea/
+
+build/
+image.debug
+*.out
+*.debug
+*.diff
+*.result
+*.time
+*.failure
+*.cycles
+
+tests/p7/
+all_tests/
+my_results/

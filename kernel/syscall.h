@@ -39,6 +39,10 @@ constexpr uint64_t MMAP = 9;         // mmap(addr, length, prot, flags, fd,
 constexpr uint64_t MUNMAP = 11;      // munmap(addr, length)
 constexpr uint64_t RT_SIGACTION = 13;
 constexpr uint64_t RT_SIGRETURN = 15;
+constexpr uint64_t IOCTL = 16;
+constexpr uint64_t DUP = 32;
+constexpr uint64_t DUP2 = 33;
+constexpr uint64_t FCNTL = 72;
 constexpr uint64_t NANOSLEEP = 35;
 constexpr uint64_t ALARM = 37;
 constexpr uint64_t KILL = 62;
@@ -82,6 +86,47 @@ constexpr uint64_t O_DIRECTORY  = 00200000;
 constexpr uint64_t O_NOFOLLOW   = 00400000;
 constexpr uint64_t O_NOATIME    = 01000000;
 constexpr uint64_t O_CLOEXEC    = 02000000;
+constexpr uint64_t O_NONBLOCK   = 00004000;
+constexpr uint64_t O_ASYNC      = 00020000;
+
+constexpr uint64_t O_STATUS_FLAGS = O_APPEND | O_NONBLOCK | O_NOATIME | O_DIRECT | O_ASYNC;
+
+constexpr uint64_t F_DUPFD = 0;
+constexpr uint64_t F_GETFD = 1;
+constexpr uint64_t F_SETFD = 2;
+constexpr uint64_t F_GETFL = 3;
+constexpr uint64_t F_SETFL = 4;
+constexpr uint64_t F_GETLK = 5;
+constexpr uint64_t F_SETLK = 6;
+constexpr uint64_t F_SETLKW = 7;
+constexpr uint64_t F_OFD_GETLK = 36;
+constexpr uint64_t F_OFD_SETLK = 37;
+constexpr uint64_t F_OFD_SETLKW = 38;
+constexpr uint64_t F_DUPFD_CLOEXEC = 1030;
+constexpr uint64_t FD_CLOEXEC = 1;
+constexpr int16_t F_RDLCK = 0;
+constexpr int16_t F_WRLCK = 1;
+constexpr int16_t F_UNLCK = 2;
+
+constexpr uint64_t TCGETS = 0x5401;
+constexpr uint64_t TCSETS = 0x5402;
+constexpr uint64_t TCSETSW = 0x5403;
+constexpr uint64_t TCSETSF = 0x5404;
+constexpr uint64_t TIOCGWINSZ = 0x5413;
+constexpr uint64_t FIONREAD = 0x541B;
+constexpr uint64_t FIONBIO = 0x5421;
+constexpr uint64_t FIONCLEX = 0x5450;
+constexpr uint64_t FIOCLEX = 0x5451;
+constexpr uint64_t FIOASYNC = 0x5452;
+
+constexpr uint32_t S_IFMT = 0170000;
+constexpr uint32_t S_IFSOCK = 0140000;
+constexpr uint32_t S_IFLNK = 0120000;
+constexpr uint32_t S_IFREG = 0100000;
+constexpr uint32_t S_IFBLK = 0060000;
+constexpr uint32_t S_IFDIR = 0040000;
+constexpr uint32_t S_IFCHR = 0020000;
+constexpr uint32_t S_IFIFO = 0010000;
 
 // openat/execveat's flags (Linux's values)
 constexpr uint64_t AT_FDCWD = -100;
@@ -111,6 +156,7 @@ constexpr uint64_t CLONE_PARENT_SETTID = 0x100000;
 constexpr uint64_t CLONE_CHILD_CLEARTID = 0x200000;
 
 // error results
+constexpr int64_t EPERM = -1;
 constexpr int64_t ENOENT = -2;
 constexpr int64_t ESRCH = -3;
 constexpr int64_t EBADF = -9;
@@ -124,6 +170,8 @@ constexpr int64_t ENOTDIR = -20;
 constexpr int64_t EISDIR = -21;
 constexpr int64_t EINVAL = -22;
 constexpr int64_t EMFILE = -24;
+constexpr int64_t ENOTTY = -25;
+constexpr int64_t EFBIG = -27;
 constexpr int64_t ENOSPC = -28;
 constexpr int64_t ESPIPE = -29;
 constexpr int64_t EPIPE = -32;
@@ -138,5 +186,9 @@ constexpr uint64_t RUSAGE_STRUCT_SIZE = 152;
 
 // Called on each core, after CCB::init_core and with EFER.SCE set
 extern void init_core();
+
+extern bool user_range(uintptr_t start, uint64_t len);
+extern bool copy_from_user(void *dst, const void *usrc, uint64_t len);
+extern bool copy_to_user(void *udst, const void *src, uint64_t len);
 
 } // namespace Syscall

@@ -1,0 +1,78 @@
+*** t1 start
+ok: open data.txt
+ok: dup returns the lowest free fd
+ok: dup'd fds share the file position
+ok: dup of a closed fd fails with EBADF
+ok: O_CLOEXEC sets FD_CLOEXEC
+ok: dup clears FD_CLOEXEC
+ok: dup2(fd, fd) returns fd
+ok: dup2(closed, same) fails with EBADF
+ok: dup2 of a closed fd fails with EBADF
+ok: dup2 to a high fd shares the position
+ok: dup2 onto an open fd replaces it
+ok: dup2 past the fd limit fails with EBADF
+ok: dup3(fd, fd) fails with EINVAL
+ok: dup3 with O_CLOEXEC
+ok: F_DUPFD gives the lowest free fd >= arg
+ok: F_DUPFD skips fds in use
+ok: F_DUPFD_CLOEXEC sets FD_CLOEXEC
+ok: F_DUPFD doesn't
+ok: F_DUPFD with a negative fd fails with EINVAL
+ok: F_SETFD sets FD_CLOEXEC
+ok: F_SETFD clears it
+ok: ioctl FIOCLEX
+ok: ioctl FIONCLEX
+ok: fcntl on a closed fd fails with EBADF
+ok: an unknown fcntl command fails with EINVAL
+ok: F_GETFL of an O_RDONLY file
+ok: F_GETFL of an O_WRONLY file
+ok: F_GETFL shows O_APPEND
+ok: F_SETFL is shared by dup'd fds
+ok: but not by a separate open
+ok: F_SETFL doesn't change the access mode
+ok: write ab
+ok: F_SETFL O_APPEND, then write cd at offset 0
+ok: O_APPEND from F_SETFL appended
+ok: clearing O_APPEND writes at the position again
+ok: F_WRLCK on a read-only fd fails with EBADF
+ok: F_RDLCK on a read-only fd
+ok: F_WRLCK on a read-write fd
+ok: F_GETLK finds no conflicting lock
+ok: a bad l_type fails with EINVAL
+ok: F_UNLCK
+ok: F_OFD_SETLK with l_pid != 0 fails with EINVAL
+ok: F_OFD_SETLK
+ok: FIONREAD on a file: the bytes after the position
+ok: TCGETS on a file fails with ENOTTY
+ok: an unknown ioctl fails with ENOTTY
+ok: ioctl on a closed fd fails with EBADF
+ok: the console is a terminal
+ok: a file isn't
+ok: TIOCGWINSZ on the console
+ok: pipe2(O_NONBLOCK)
+ok: both ends are O_NONBLOCK
+ok: reading an empty O_NONBLOCK pipe fails with EAGAIN
+ok: FIONREAD on a pipe
+ok: read it
+ok: writing a full O_NONBLOCK pipe fails with EAGAIN
+ok: it filled at 64 KiB
+ok: lseek on a pipe fails with ESPIPE
+ok: mmap of a pipe fails with ENODEV
+ok: openat with a pipe as dirfd fails with ENOTDIR
+ok: TCGETS on a pipe fails with ENOTTY
+ok: an O_NONBLOCK pipe with no writer reads 0, not EAGAIN
+ok: a plain pipe blocks
+ok: FIONBIO 1 makes it O_NONBLOCK
+ok: FIONBIO 0 clears it
+ok: the child sees the parent's O_NONBLOCK
+ok: the parent sees the child clear it
+ok: mmap of a file
+ok: mmap of an O_WRONLY file fails with EACCES
+ok: read of a directory fails with EISDIR
+ok: openat with a directory fd
+ok: lseek on the console fails with ESPIPE
+ok: read x from the console
+ok: make the console O_NONBLOCK
+ok: an O_NONBLOCK read gets y (EAGAIN until it arrives)
+ok: then the end of the input: 0
+*** t1 passed

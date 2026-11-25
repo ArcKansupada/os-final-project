@@ -27,6 +27,7 @@
 #include "elf.h"
 #include "async/event.h"
 #include "io/console.h"
+#include "io/open_file.h"
 #include "memory/vmm.h"
 
 namespace impl
@@ -35,38 +36,31 @@ class AddressSpace;
 struct TCB;
 bool current_thread_dead();
 
-enum FileType { SEEKING, CONSOLE, PIPE };
-
-class SeekingFile;
-
-class OpenFile {
-protected:
-    OpenFile(FileType type, bool rd, bool wr) : rd(rd), wr(wr), type(type) {}
-
-public:
-    const bool rd;
-    const bool wr;
-
-    virtual ~OpenFile() = default;
-
-    const FileType type;
-
-    SeekingFile* seeking() { return type == SEEKING ? (SeekingFile*)this : nullptr; }
-    virtual sync<uint64_t> read(char *buf, uint64_t len);
-    virtual sync<uint64_t> write(char *buf, uint64_t len);
-};
-
 class SeekingFile : public OpenFile {
     Mutex<uint64_t> cursor{0};
-    bool append;
-    bool no_atime;
+
+    sync<void> touch_atime() {
+        if (status() & Syscall::O_NOATIME) co_return;
+        co_await file->edit_inode([] (Ext2Inode& inode) {
+            inode.atime = std::max(inode.atime, Sys::unix_time());
+        });
+    }
+
+    sync<void> touch_mtime() {
+        co_await file->edit_inode([] (Ext2Inode& inode) {
+            inode.mtime = std::max(inode.mtime, Sys::unix_time());
+        });
+    }
 
 public:
     const StrongRef<Node> file;
-    SeekingFile(StrongRef<Node> file, bool rd, bool wr, bool append, bool no_atime) : OpenFile(SEEKING, rd, wr),
-    append(append), no_atime(no_atime), file(file) {}
+    SeekingFile(StrongRef<Node> file, bool rd, bool wr, uint32_t status)
+        : OpenFile(rd, wr, status), file(file) {}
 
-    sync<int64_t> seek(int64_t offset, uint64_t whence) {
+    bool fill_reads() const override { return true; }
+    StrongRef<Node> node() override { return file; }
+
+    sync<int64_t> seek(int64_t offset, uint64_t whence) override {
         auto proof = co_await cursor;
 
         int64_t target;
@@ -86,12 +80,9 @@ public:
         co_return target;
     }
 
-    sync<uint64_t> read(char *buf, uint64_t len) override {
-        if (!no_atime) {
-            co_await file->edit_inode([] (Ext2Inode& inode) {
-                inode.atime = std::max(inode.atime, Sys::unix_time());
-            });
-        }
+    sync<int64_t> read(char *buf, uint64_t len) override {
+        if (co_await file->is_dir()) co_return Syscall::EISDIR;
+        co_await touch_atime();
 
         auto proof = co_await cursor;
         if (proof.data() >= UINT32_MAX) co_return 0;
@@ -101,37 +92,104 @@ public:
         co_return read;
     }
 
-    sync<uint64_t> write(char *buf, uint64_t len) override {
-        co_await file->edit_inode([] (Ext2Inode& inode) {
-            inode.mtime = std::max(inode.mtime, Sys::unix_time());
-        });
+    sync<int64_t> write(const char *buf, uint64_t len) override {
+        co_await touch_mtime();
 
         auto proof = co_await cursor;
-        if (append) proof.data() = co_await file->size_in_bytes();
+        if (status() & Syscall::O_APPEND) proof.data() = co_await file->size_in_bytes();
         if (proof.data() >= UINT32_MAX) co_return 0;
         int64_t written = co_await file->write_all(proof.data(), std::min<uint64_t>(len, UINT32_MAX - proof.data()), buf);
         if (written > 0) proof.data() += written;
 
         co_return written;
     }
+
+    sync<int64_t> pread(char *buf, uint64_t len, uint64_t offset) override {
+        if (co_await file->is_dir()) co_return Syscall::EISDIR;
+        co_await touch_atime();
+        if (offset >= UINT32_MAX) co_return 0;
+        co_return co_await file->read_all(offset, std::min<uint64_t>(len, UINT32_MAX - offset), buf);
+    }
+
+    sync<int64_t> pwrite(const char *buf, uint64_t len, uint64_t offset) override {
+        co_await touch_mtime();
+        if (status() & Syscall::O_APPEND) offset = co_await file->size_in_bytes();
+        if (offset >= UINT32_MAX) co_return Syscall::EFBIG;
+        co_return co_await file->write_all(offset, std::min<uint64_t>(len, UINT32_MAX - offset), buf);
+    }
+
+    sync<int64_t> ioctl(uint64_t cmd, uint64_t arg) override {
+        if (cmd != Syscall::FIONREAD || co_await file->is_dir()) co_return Syscall::ENOTTY;
+        uint64_t position = (co_await cursor).data();
+        uint64_t size = co_await file->size_in_bytes();
+        int count = position < size ? int(std::min<uint64_t>(size - position, INT32_MAX)) : 0;
+        co_return Syscall::copy_to_user((void*)arg, &count, sizeof(count)) ? 0 : Syscall::EFAULT;
+    }
+
+    sync<int64_t> mmap(void *addr, uint64_t length, int prot, int flags, uint64_t offset) override {
+        if (!rd) co_return Syscall::EACCES;
+        if (co_await file->is_dir()) co_return Syscall::ENODEV;
+        if ((flags & VMM::MAP_SHARED) && (prot & VMM::PROT_WRITE) && !wr) co_return Syscall::EACCES;
+        void *p = co_await VMM::mmap(addr, length, prot, flags, file, offset);
+        if (p == VMM::MAP_FAILED) co_return Syscall::EINVAL;
+        co_return (int64_t)(uintptr_t)p;
+    }
+
+    sync<int64_t> stat(FileStat &out) override {
+        auto proof = co_await file->inode.readonly();
+        const Ext2Inode &inode = proof.data();
+        out = FileStat{};
+        out.dev = 1;
+        out.ino = file->number;
+        out.nlink = inode.links_count;
+        out.mode = inode.mode;
+        out.uid = inode.uid;
+        out.gid = inode.gid;
+        out.size = inode.size_low;
+        out.blksize = file->block_size;
+        out.blocks = inode.sectors;
+        out.atime = inode.atime;
+        out.mtime = inode.mtime;
+        out.ctime = inode.ctime;
+        co_return 0;
+    }
+
+    sync<int64_t> fsync() override {
+        co_await file->ext2->flush();
+        co_return 0;
+    }
+
+    sync<int64_t> truncate(uint64_t length) override {
+        if (!wr || co_await file->is_dir()) co_return Syscall::EINVAL;
+        if (length > UINT32_MAX) co_return Syscall::EFBIG;
+        co_await VMM::truncate_file(file, uint32_t(length));
+        co_return 0;
+    }
 };
 
 class ConsoleFile : public OpenFile {
     bool debug;
 public:
-    ConsoleFile(bool debug) : OpenFile(CONSOLE, !debug, true), debug(debug) {}
+    ConsoleFile(bool debug) : OpenFile(!debug, true), debug(debug) {}
 
-    sync<uint64_t> read(char *buf, uint64_t len) override {
-        if (debug) co_return -1;
+    uint32_t mode() const override { return Syscall::S_IFCHR | 0620; }
 
+    sync<int64_t> read(char *buf, uint64_t len) override {
+        if (debug) co_return Syscall::EINVAL;
         if (len == 0) co_return 0;
-        char ch = co_await Console::getch();
+        int ch;
+        if (nonblocking()) {
+            ch = co_await Console::try_getch();
+            if (ch < 0) co_return Syscall::EAGAIN;
+        } else {
+            ch = co_await Console::getch();
+        }
         if (ch == '\4') co_return 0;
-        buf[0] = ch;
+        buf[0] = char(ch);
         co_return 1;
     }
 
-    sync<uint64_t> write(char *buf, uint64_t len) override {
+    sync<int64_t> write(const char *buf, uint64_t len) override {
         if (debug) {
             print_lock();
             for (uint64_t i = 0; i < len; i++) putch(buf[i]);
@@ -139,6 +197,42 @@ public:
         } else co_await Console::write(buf, len);
 
         co_return len;
+    }
+
+    sync<int64_t> ioctl(uint64_t cmd, uint64_t arg) override {
+        struct Termios { uint32_t iflag, oflag, cflag, lflag; uint8_t line; uint8_t cc[19]; };
+        static_assert(sizeof(Termios) == 36);
+        struct Winsize { uint16_t rows, cols, xpixel, ypixel; };
+
+        switch (cmd) {
+        case Syscall::TCGETS: {
+            Termios t{};
+            t.cflag = 0000017 | 0000060 | 0000200;
+            co_return Syscall::copy_to_user((void*)arg, &t, sizeof(t)) ? 0 : Syscall::EFAULT;
+        }
+        case Syscall::TCSETS:
+        case Syscall::TCSETSW:
+        case Syscall::TCSETSF: {
+            Termios t;
+            co_return Syscall::copy_from_user(&t, (void*)arg, sizeof(t)) ? 0 : Syscall::EFAULT;
+        }
+        case Syscall::TIOCGWINSZ: {
+            Winsize w{24, 80, 0, 0};
+            co_return Syscall::copy_to_user((void*)arg, &w, sizeof(w)) ? 0 : Syscall::EFAULT;
+        }
+        case Syscall::FIONREAD: {
+            int count = !debug && Console::readable() ? 1 : 0;
+            co_return Syscall::copy_to_user((void*)arg, &count, sizeof(count)) ? 0 : Syscall::EFAULT;
+        }
+        default:
+            co_return Syscall::ENOTTY;
+        }
+    }
+
+    uint32_t poll_ready() override {
+        uint32_t ready = POLLOUT | POLLWRNORM;
+        if (!debug && Console::readable()) ready |= POLLIN | POLLRDNORM;
+        return ready;
     }
 };
 
@@ -157,9 +251,19 @@ class PipeFile : public OpenFile {
         SpinLock lock;
         BlockingLock reader_lock;
         Event readable, writable;
+        PollQueue read_pollers, write_pollers;
         PipePage *head = nullptr, *tail = nullptr;
         uint64_t pages = 0;
         bool reader = true, writer = true;
+
+        bool has_room(uint64_t bytes) const {
+            return pages < PIPE_CAPACITY || (tail != nullptr && FRAME_SIZE - tail->writeOffset >= bytes);
+        }
+        uint64_t buffered() const {
+            uint64_t n = 0;
+            for (auto *p = head; p; p = p->next) n += p->writeOffset - p->readOffset;
+            return n;
+        }
 
         ~State() {
             while (head) {
@@ -172,7 +276,7 @@ class PipeFile : public OpenFile {
     };
     StrongRef<State> state;
 
-    PipeFile(StrongRef<State> state, bool read) : OpenFile(PIPE, read, !read), state(state) {}
+    PipeFile(StrongRef<State> state, bool read, uint32_t status) : OpenFile(read, !read, status), state(state) {}
 
 public:
     ~PipeFile() override {
@@ -180,19 +284,23 @@ public:
         if (rd) {
             state->reader = false;
             state->writable.trigger();
+            state->write_pollers.notify(POLLERR | POLLOUT);
         } else {
             state->writer = false;
             state->readable.trigger();
+            state->read_pollers.notify(POLLHUP | POLLIN);
         }
     }
 
-    static std::pair<StrongRef<OpenFile>, StrongRef<OpenFile>> create() {
+    static std::pair<StrongRef<OpenFile>, StrongRef<OpenFile>> create(uint32_t status = 0) {
         StrongRef state{new State};
-        return {StrongRef<OpenFile>{new PipeFile{state, true}},
-                StrongRef<OpenFile>{new PipeFile{state, false}}};
+        return {StrongRef<OpenFile>{new PipeFile{state, true, status}},
+                StrongRef<OpenFile>{new PipeFile{state, false, status}}};
     }
 
-    sync<uint64_t> read(char *buf, uint64_t len) override {
+    uint32_t mode() const override { return Syscall::S_IFIFO | 0600; }
+
+    sync<int64_t> read_user(char *buf, uint64_t len) override {
         if (len == 0) co_return 0;
         auto &s = *state.operator->();
         auto reader = co_await s.reader_lock;
@@ -201,6 +309,7 @@ public:
         {
             LockGuard g{s.lock};
             while (s.head == nullptr && s.writer) {
+                if (nonblocking()) co_return Syscall::EAGAIN;
                 co_await s.readable.wait(s.lock);
                 if (current_thread_dead()) co_return 0;
             }
@@ -231,25 +340,26 @@ public:
                 --s.pages;
                 if (s.head == nullptr) s.tail = nullptr;
                 s.writable.trigger();
+                s.write_pollers.notify(POLLOUT | POLLWRNORM);
             }
         }
 
-        co_return read ? read : left ? Syscall::EFAULT : 0;
+        co_return read ? int64_t(read) : left ? Syscall::EFAULT : 0;
     }
 
-    sync<uint64_t> write(char *buf, uint64_t len) override {
+    sync<int64_t> write(const char *buf, uint64_t len) override {
         auto &s = *state.operator->();
         uint64_t written = 0;
         while (len > 0) {
             uint64_t writing = std::min(len, PIPE_BUF);
             LockGuard g{s.lock};
             // Reserve enough room before copying any of this atomic chunk.
-            while (s.reader && s.pages == PIPE_CAPACITY &&
-                   (s.tail == nullptr || FRAME_SIZE - s.tail->writeOffset < writing)) {
+            while (s.reader && !s.has_room(writing)) {
+                if (nonblocking()) co_return written == 0 ? Syscall::EAGAIN : int64_t(written);
                 co_await s.writable.wait(s.lock);
                 if (current_thread_dead()) co_return written;
             }
-            if (!s.reader) co_return written == 0 ? Syscall::EPIPE : written;
+            if (!s.reader) co_return written == 0 ? Syscall::EPIPE : int64_t(written);
 
             while (writing > 0) {
                 if (s.tail == nullptr || s.tail->writeOffset == FRAME_SIZE) {
@@ -271,9 +381,35 @@ public:
                 len -= to_write;
             }
             s.readable.trigger();
+            s.read_pollers.notify(POLLIN | POLLRDNORM);
         }
 
         co_return written;
+    }
+
+    sync<int64_t> ioctl(uint64_t cmd, uint64_t arg) override {
+        if (cmd != Syscall::FIONREAD) co_return Syscall::ENOTTY;
+        int count;
+        {
+            LockGuard g{state->lock};
+            count = int(std::min<uint64_t>(state->buffered(), INT32_MAX));
+        }
+        co_return Syscall::copy_to_user((void*)arg, &count, sizeof(count)) ? 0 : Syscall::EFAULT;
+    }
+
+    uint32_t poll_ready() override {
+        LockGuard g{state->lock};
+        if (rd) {
+            uint32_t ready = state->head ? POLLIN | POLLRDNORM : 0;
+            if (!state->writer) ready |= POLLHUP;
+            return ready;
+        }
+        if (!state->reader) return POLLERR | POLLOUT;
+        return state->has_room(1) ? POLLOUT | POLLWRNORM : 0;
+    }
+
+    PollQueue *poll_queue() override {
+        return rd ? &state->read_pollers : &state->write_pollers;
     }
 };
 
@@ -393,6 +529,36 @@ struct FileDescriptorTable {
         if (newFd == next_fd) find_next();
 
         return newFd;
+    }
+
+    int64_t dup_min(uint64_t oldFd, uint64_t min, bool cloexec) {
+        LockGuard g{lock};
+        if (oldFd >= capacity || is_free(oldFd)) return Syscall::EBADF;
+        if (min >= MAX_FDS) return Syscall::EINVAL;
+
+        uint64_t fd = min;
+        while (fd < capacity && !is_free(fd)) fd++;
+        if (fd >= MAX_FDS) return Syscall::EMFILE;
+        if (fd >= capacity) resize(fd + 1);
+
+        table[fd] = { .file = table[oldFd].file, .close_on_exec = cloexec };
+        free_fds[fd/64] &= ~(1ull << (fd % 64));
+        if (fd == next_fd) find_next();
+
+        return fd;
+    }
+
+    int64_t get_cloexec(uint64_t fd) {
+        LockGuard g{lock};
+        if (fd >= capacity || is_free(fd)) return Syscall::EBADF;
+        return table[fd].close_on_exec ? Syscall::FD_CLOEXEC : 0;
+    }
+
+    int64_t set_cloexec(uint64_t fd, bool cloexec) {
+        LockGuard g{lock};
+        if (fd >= capacity || is_free(fd)) return Syscall::EBADF;
+        table[fd].close_on_exec = cloexec;
+        return 0;
     }
 
     // Copy ownership under the table lock; the caller may safely suspend.
