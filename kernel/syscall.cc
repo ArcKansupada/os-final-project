@@ -28,6 +28,7 @@
 #include <utility>
 
 #include "kernel_main.h"
+#include "lib/print.h"
 
 extern "C" void syscallHandler_();
 
@@ -176,27 +177,33 @@ bool store_tid(uint64_t addr, int value) {
   return user_range(addr, sizeof(value)) && !VMM::store_user32_((uint32_t*)addr, value);
 }
 
-// Never touch user buffers inside a file's own locks: they may fault. Writes and
-// file reads transfer everything; console reads return after one available chunk.
-sync<uint64_t> buffered_io(impl::OpenFile *file, char *buf, uint64_t len, bool writing) {
-  char bounce[FRAME_SIZE];
-  uint64_t total = 0;
-  while (total < len && !impl::current_thread_dead()) {
-    uint64_t n = std::min<uint64_t>(FRAME_SIZE, len - total);
-    uint64_t left = writing ? VMM::copy_user_(bounce, buf + total, n) : 0;
-    if (left == n) co_return total ? total : Syscall::EFAULT;
-    int64_t count = writing ? co_await file->write(bounce, n - left) : co_await file->read(bounce, n);
-    if (count < 0) co_return total ? total : count;
-    if (impl::current_thread_dead()) break;
-    if (!writing) {
-      left = VMM::copy_user_(buf + total, bounce, count);
-      count -= left;
-    }
-    total += count;
-    if (left) co_return total ? total : Syscall::EFAULT;
-    if (uint64_t(count) < n || !(writing || file->type == impl::SEEKING)) break;
+struct Flock {
+  int16_t type;
+  int16_t whence;
+  int64_t start;
+  int64_t len;
+  int32_t pid;
+};
+static_assert(sizeof(Flock) == 32);
+
+int64_t fcntl_lock(impl::OpenFile *file, uint64_t cmd, uintptr_t arg) {
+  Flock lock;
+  if (!read_user(&lock, (void*)arg, sizeof(lock))) return Syscall::EFAULT;
+  if (lock.type != Syscall::F_RDLCK && lock.type != Syscall::F_WRLCK && lock.type != Syscall::F_UNLCK)
+    return Syscall::EINVAL;
+  if (lock.whence != int16_t(Syscall::SEEK_SET) && lock.whence != int16_t(Syscall::SEEK_CUR) &&
+      lock.whence != int16_t(Syscall::SEEK_END))
+    return Syscall::EINVAL;
+  bool ofd = cmd == Syscall::F_OFD_GETLK || cmd == Syscall::F_OFD_SETLK || cmd == Syscall::F_OFD_SETLKW;
+  if (ofd && lock.pid != 0) return Syscall::EINVAL;
+
+  if (cmd == Syscall::F_GETLK || cmd == Syscall::F_OFD_GETLK) {
+    lock.type = Syscall::F_UNLCK;
+    return write_user((void*)arg, &lock, sizeof(lock)) ? 0 : Syscall::EFAULT;
   }
-  co_return total;
+  if (lock.type == Syscall::F_RDLCK && !file->rd) return Syscall::EBADF;
+  if (lock.type == Syscall::F_WRLCK && !file->wr) return Syscall::EBADF;
+  return 0;
 }
 
 struct FutexKey {
@@ -263,12 +270,6 @@ sync<uint64_t> dispatch(TCB *t) {
   UserContext &c = t->context;
   switch (c.rax) {
   case Syscall::READ: {
-    // read(fd, buf, len): stdin only, one character from the console (COM2),
-    // raw: no echo, no line editing.
-    //   Q: Why does it return after one character instead of filling buf?
-    //   Q: What does the thread do while it waits for a key, and its core?
-    //   Q: Why read the key before touching buf?
-
     uint64_t fd = c.rdi;
     auto *buf = (char *)c.rsi;
     uint64_t len = c.rdx;
@@ -280,15 +281,9 @@ sync<uint64_t> dispatch(TCB *t) {
     if (file == nullptr) co_return Syscall::EBADF;
     if (!file->rd) co_return Syscall::EBADF;
 
-    if (file->type == impl::PIPE) co_return co_await file->read(buf, len); // copies out transactionally
-    co_return co_await buffered_io(file.operator->(), buf, len, false);
+    co_return co_await file->read_user(buf, len);
   }
   case Syscall::WRITE: {
-    // write(fd, buf, len): stdout (1) goes to the console (COM2), stderr (2) to
-    // the debug output (COM1).
-    //   Q: How much of buf does it send?
-    //   Q: What does it return for any other fd?
-
     uint64_t fd = c.rdi;
     auto *buf = (char *)c.rsi;
     uint64_t len = c.rdx;
@@ -300,7 +295,7 @@ sync<uint64_t> dispatch(TCB *t) {
     if (file == nullptr) co_return Syscall::EBADF;
     if (!file->wr) co_return Syscall::EBADF;
 
-    co_return co_await buffered_io(file.operator->(), buf, len, true);
+    co_return co_await file->write_user(buf, len);
   }
   case Syscall::SCHED_YIELD: {
     co_await yield();
@@ -426,19 +421,17 @@ sync<uint64_t> dispatch(TCB *t) {
     uint64_t fd = c.r8;
     uint64_t offset = c.r9;
 
-    StrongRef<Node> file{};
     if (!(flags & VMM::MAP_ANONYMOUS)) {
       auto of = t->process->fd_table.get(fd);
       if (of == nullptr) co_return Syscall::EBADF;
       if (!of->rd) co_return Syscall::EACCES;
-      if (of->type != impl::SEEKING || co_await of->seeking()->file->is_dir()) co_return Syscall::ENODEV;
-      if ((flags & VMM::MAP_SHARED) && (prot & VMM::PROT_WRITE) && !of->wr) co_return Syscall::EACCES;
-      file = of->seeking()->file;
+      if (addr != nullptr && !user_range((uintptr_t)addr, length)) co_return Syscall::EFAULT;
+      co_return co_await of->mmap(addr, length, prot, flags, offset);
     }
 
     if (addr != nullptr && !user_range((uintptr_t)addr, length)) co_return Syscall::EFAULT;
 
-    void *p = co_await VMM::mmap(addr, length, prot, flags, file, offset);
+    void *p = co_await VMM::mmap(addr, length, prot, flags, StrongRef<Node>{}, offset);
     if (p == VMM::MAP_FAILED) co_return Syscall::EINVAL;
     co_return (uintptr_t)p;
   }
@@ -542,8 +535,8 @@ sync<uint64_t> dispatch(TCB *t) {
     if (path[0] != '/' && dir_fd != Syscall::AT_FDCWD) {
       auto file = t->process->fd_table.get(dir_fd);
       if (file == nullptr) co_return Syscall::EBADF;
-      if (file->type != impl::SEEKING) co_return Syscall::ENOTDIR;
-      dir = file->seeking()->file;
+      dir = file->node();
+      if (dir == nullptr) co_return Syscall::ENOTDIR;
     }
 
     auto res = co_await impl::fs->find(dir, path, !(flags & Syscall::O_NOFOLLOW));
@@ -562,7 +555,72 @@ sync<uint64_t> dispatch(TCB *t) {
     if (flags & Syscall::O_TRUNC) co_await VMM::truncate_file(file, 0);
 
     co_return t->process->fd_table.open(StrongRef<impl::OpenFile>{new impl::SeekingFile(file, read, write,
-      flags & Syscall::O_APPEND, flags & Syscall::O_NOATIME)}, flags & Syscall::O_CLOEXEC);
+      flags & Syscall::O_STATUS_FLAGS)}, flags & Syscall::O_CLOEXEC);
+  }
+  case Syscall::DUP:
+    co_return t->process->fd_table.dup_min(c.rdi, 0, false);
+  case Syscall::DUP2: {
+    uint64_t oldFd = c.rdi;
+    uint64_t newFd = c.rsi;
+    if (oldFd == newFd) co_return t->process->fd_table.get(oldFd) == nullptr ? Syscall::EBADF : int64_t(newFd);
+    co_return t->process->fd_table.dup(oldFd, newFd, false);
+  }
+  case Syscall::FCNTL: {
+    uint64_t fd = c.rdi;
+    uint64_t cmd = uint32_t(c.rsi);
+    uint64_t arg = c.rdx;
+
+    auto file = t->process->fd_table.get(fd);
+    if (file == nullptr) co_return Syscall::EBADF;
+
+    switch (cmd) {
+    case Syscall::F_DUPFD:
+    case Syscall::F_DUPFD_CLOEXEC:
+      if (int32_t(arg) < 0) co_return Syscall::EINVAL;
+      co_return t->process->fd_table.dup_min(fd, uint32_t(arg), cmd == Syscall::F_DUPFD_CLOEXEC);
+    case Syscall::F_GETFD:
+      co_return t->process->fd_table.get_cloexec(fd);
+    case Syscall::F_SETFD:
+      co_return t->process->fd_table.set_cloexec(fd, arg & Syscall::FD_CLOEXEC);
+    case Syscall::F_GETFL:
+      co_return file->get_fl();
+    case Syscall::F_SETFL:
+      file->set_status(uint32_t(arg));
+      co_return 0;
+    case Syscall::F_GETLK:
+    case Syscall::F_SETLK:
+    case Syscall::F_SETLKW:
+    case Syscall::F_OFD_GETLK:
+    case Syscall::F_OFD_SETLK:
+    case Syscall::F_OFD_SETLKW:
+      co_return fcntl_lock(file.operator->(), cmd, arg);
+    default:
+      co_return Syscall::EINVAL;
+    }
+  }
+  case Syscall::IOCTL: {
+    uint64_t fd = c.rdi;
+    uint64_t cmd = uint32_t(c.rsi);
+    uint64_t arg = c.rdx;
+
+    auto file = t->process->fd_table.get(fd);
+    if (file == nullptr) co_return Syscall::EBADF;
+
+    switch (cmd) {
+    case Syscall::FIOCLEX:
+    case Syscall::FIONCLEX:
+      co_return t->process->fd_table.set_cloexec(fd, cmd == Syscall::FIOCLEX);
+    case Syscall::FIONBIO:
+    case Syscall::FIOASYNC: {
+      int on;
+      if (!read_user(&on, (void*)arg, sizeof(on))) co_return Syscall::EFAULT;
+      uint32_t bit = cmd == Syscall::FIONBIO ? Syscall::O_NONBLOCK : Syscall::O_ASYNC;
+      file->set_status(on ? file->status() | bit : file->status() & ~bit);
+      co_return 0;
+    }
+    default:
+      co_return co_await file->ioctl(cmd, arg);
+    }
   }
   case Syscall::DUP3: {
     uint64_t oldFd = c.rdi;
@@ -578,12 +636,11 @@ sync<uint64_t> dispatch(TCB *t) {
     uint32_t *pipefd = VA{c.rdi};
     uint64_t flags = c.rsi;
 
-    // we only support cloexec
-    if (flags & ~Syscall::O_CLOEXEC) co_return Syscall::EINVAL;
+    if (flags & ~(Syscall::O_CLOEXEC | Syscall::O_NONBLOCK)) co_return Syscall::EINVAL;
 
     if (!user_range((uintptr_t) pipefd, sizeof(uint32_t)*2)) co_return Syscall::EFAULT;
 
-    auto [readFile, writeFile] = impl::PipeFile::create();
+    auto [readFile, writeFile] = impl::PipeFile::create(flags & Syscall::O_NONBLOCK);
 
     uint32_t fds[2];
     int64_t result = t->process->fd_table.open_pair(readFile, writeFile, flags & Syscall::O_CLOEXEC, fds);
@@ -608,10 +665,8 @@ sync<uint64_t> dispatch(TCB *t) {
 
     auto file = t->process->fd_table.get(fd);
     if (file == nullptr) co_return Syscall::EBADF;
-    if (file->type == impl::PIPE) co_return Syscall::ESPIPE;
-    if (file->type != impl::SEEKING) co_return Syscall::EBADF;
 
-    co_return co_await file->seeking()->seek(offset, whence);
+    co_return co_await file->seek(offset, whence);
   }
   case Syscall::GETPID: { co_return t->process->pid; }
   case Syscall::GETCWD:
@@ -696,8 +751,8 @@ sync<uint64_t> dispatch(TCB *t) {
     if (path[0] != '/' && dir_fd != Syscall::AT_FDCWD) {
       auto file = t->process->fd_table.get(dir_fd);
       if (file == nullptr) co_return Syscall::EBADF;
-      if (file->type != impl::SEEKING) co_return Syscall::ENOTDIR;
-      dir = file->seeking()->file;
+      dir = file->node();
+      if (dir == nullptr) co_return Syscall::ENOTDIR;
     }
 
     auto res = co_await impl::fs->find(dir, path, !(flags & Syscall::AT_SYMLINK_NOFOLLOW));
@@ -715,16 +770,41 @@ sync<uint64_t> dispatch(TCB *t) {
     co_return co_await t->process->exec(t, res.file, kargv, kenvp);
   }
   default:
+    KPRINT("ENOSYS: syscall ? (pid ? tid ?) rip ? args ? ? ? ? ? ?\n",
+           Dec(c.rax), Dec(t->process->pid), Dec(t->tid), c.rip,
+           c.rdi, c.rsi, c.rdx, c.r10, c.r8, c.r9);
     co_return Syscall::ENOSYS;
   }
 }
 
-async<void> finish_syscall(StrongRef<TCB> t, sync<uint64_t> call) {
+#ifdef SYSCALL_TRACE
+constexpr bool TRACE_SYSCALLS = true;
+#else
+constexpr bool TRACE_SYSCALLS = false;
+#endif
+
+void trace_enter(TCB *t) {
+  const UserContext &c = t->context;
+  KPRINT("strace ?/? syscall ?(? ? ? ? ? ?)\n", Dec(t->process->pid),
+         Dec(t->tid), Dec(c.rax), c.rdi, c.rsi, c.rdx, c.r10, c.r8, c.r9);
+}
+
+void trace_exit(TCB *t, uint64_t nr, uint64_t result, bool blocked) {
+  KPRINT("strace ?/? syscall ? ?= ?\n", Dec(t->process->pid), Dec(t->tid),
+         Dec(nr), blocked ? "(blocked) " : "", Dec(int64_t(result)));
+}
+
+async<void> finish_syscall(StrongRef<TCB> t, sync<uint64_t> call, uint64_t nr) {
   t->context.rax = co_await call;
+  if constexpr (TRACE_SYSCALLS) trace_exit(t.operator->(), nr, t->context.rax, true);
   if (!t->zombie) impl::thread_queue.add(t);
 }
 
 } // namespace
+
+bool Syscall::user_range(uintptr_t start, uint64_t len) { return ::user_range(start, len); }
+bool Syscall::copy_from_user(void *dst, const void *usrc, uint64_t len) { return read_user(dst, usrc, len); }
+bool Syscall::copy_to_user(void *udst, const void *src, uint64_t len) { return write_user(udst, src, len); }
 
 // I know it's odd, but it's just where all my helper functions are >.<
 sync<void> TCB::clear_tid() {
@@ -753,10 +833,13 @@ extern "C" [[noreturn]] void syscallHandler() {
   {
     // All owners must leave scope before resume/bounce abandons this stack.
     StrongRef<TCB> hold{raw->self};
+    const uint64_t nr = raw->context.rax;
+    if constexpr (TRACE_SYSCALLS) trace_enter(raw);
     sync<uint64_t> call = dispatch(raw);
 
     if (call.await_ready()) {
       raw->context.rax = uint64_t(call.await_resume());
+      if constexpr (TRACE_SYSCALLS) trace_exit(raw, nr, raw->context.rax, false);
       resume_user = !raw->zombie;
       if (!resume_user) {
         ccb->current_thread = nullptr;
@@ -765,7 +848,7 @@ extern "C" [[noreturn]] void syscallHandler() {
     } else {
       ccb->current_thread = nullptr;
       if (raw->zombie) drop_to_kernel_cr3();
-      finish_syscall(hold, std::move(call));
+      finish_syscall(hold, std::move(call), nr);
     }
   }
 

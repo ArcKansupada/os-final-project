@@ -15,6 +15,7 @@
 #include <fcntl.h>
 #include <stdarg.h>
 #include <sys/futex.h>
+#include <sys/ioctl.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -58,6 +59,26 @@ int close(int fd) { return (int)syscall(SYS_close, fd, 0, 0, 0, 0, 0); }
 
 int pipe2(int fd[2], int flags) { return syscall(SYS_pipe2, (long)fd, flags, 0, 0, 0, 0); }
 int pipe(int fd[2]) { return pipe2(fd, 0); }
+int dup(int oldfd) { return syscall(SYS_dup, oldfd, 0, 0, 0, 0, 0); }
+int dup2(int oldfd, int newfd) { return syscall(SYS_dup2, oldfd, newfd, 0, 0, 0, 0); }
+int fcntl(int fd, int cmd, ...) {
+  va_list ap;
+  va_start(ap, cmd);
+  long arg = va_arg(ap, long);
+  va_end(ap);
+  return (int)syscall(SYS_fcntl, fd, cmd, arg, 0, 0, 0);
+}
+int ioctl(int fd, unsigned long request, ...) {
+  va_list ap;
+  va_start(ap, request);
+  long arg = va_arg(ap, long);
+  va_end(ap);
+  return (int)syscall(SYS_ioctl, fd, request, arg, 0, 0, 0);
+}
+int isatty(int fd) {
+  char termios[36];
+  return ioctl(fd, TCGETS, termios) == 0;
+}
 int dup3(int oldfd, int newfd, int flags) { return syscall(SYS_dup3, oldfd, newfd, flags, 0, 0, 0); }
 int chdir(const char *path) { return syscall(SYS_chdir, (long)path, 0, 0, 0, 0, 0); }
 char *getcwd(char *buf, size_t size) {
