@@ -25,6 +25,8 @@
 #include "filesystem/ext2.h"
 #include "lib/handle_queue.h"
 #include "kernel_main.h"
+#include "filesystem/vfs.h"
+#include "io/devices.h"
 #include "machine/machine.h"
 #include "structures/pcb.h"
 #include "structures/elf.h"
@@ -39,6 +41,8 @@ using namespace impl;
 async<void> kernel_main() {
     StrongRef<BlockIO> ide{new RamDisk(0)};
     fs = co_await Ext2::mount(ide);
+    vfs::init();
+    devices::init();
 
     StrongRef<Node> init = (co_await fs->find(fs->root, "/sbin/init")).file;
     ASSERT(init != nullptr);

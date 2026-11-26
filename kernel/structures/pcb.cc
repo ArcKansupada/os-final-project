@@ -168,7 +168,7 @@ uint64_t TCB::provision_tid() {
 sync<StrongRef<TCB>> PCB::create(StrongRef<Node> init, uint64_t stack_size) {
   StrongRef<PCB> pcb{new PCB{provision_pid()}};
   pcb->self = WeakRef{pcb};
-  pcb->cwd = fs->root;
+  pcb->cwd = vfs::Location{fs->root, {}};
   { LockGuard g{pid_lock}; process_table.put(pcb->pid, WeakRef{pcb}); }
 
   StrongRef<TCB> thread = co_await pcb->create_thread(stack_size);

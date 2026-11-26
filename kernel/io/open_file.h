@@ -9,6 +9,10 @@
 
 class Node;
 
+namespace vfs {
+class PseudoNode;
+}
+
 namespace impl {
 
 bool current_thread_dead();
@@ -100,6 +104,7 @@ public:
   virtual sync<int64_t> truncate(uint64_t length);
 
   virtual StrongRef<Node> node();
+  virtual StrongRef<vfs::PseudoNode> pseudo();
 
   virtual uint32_t poll_ready();
   virtual PollQueue *poll_queue() { return nullptr; }

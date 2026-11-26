@@ -28,6 +28,7 @@
 #include <utility>
 
 #include "kernel_main.h"
+#include "filesystem/vfs.h"
 #include "lib/print.h"
 
 extern "C" void syscallHandler_();
@@ -93,12 +94,12 @@ bool write_user(void *dst, const void *src, uint64_t len) {
 constexpr uint64_t PATH_MAX = 4096;
 
 struct Path { char bytes[PATH_MAX]; };
-int64_t copy_path(const char *path, char *out) {
+int64_t copy_path(const char *path, char *out, bool allow_empty = false) {
   for (uint64_t i = 0; i < PATH_MAX; i++) {
     uintptr_t addr = (uintptr_t)path + i;
 
     if (!read_user(out + i, (void*)addr, 1)) return Syscall::EFAULT;
-    if (out[i] == '\0') return i == 0 ? Syscall::ENOENT : 0;
+    if (out[i] == '\0') return i == 0 && !allow_empty ? Syscall::ENOENT : 0;
   }
 
   return Syscall::ENAMETOOLONG;
@@ -108,29 +109,12 @@ int64_t copy_path(const char *path, char *out) {
 // retains that frame, and thousands of sleepers must not each retain 4 KiB.
 sync<uint64_t> getcwd(TCB *t, char *buf, uint64_t size) {
   if (size == 0) co_return Syscall::ERANGE;
-  char path[PATH_MAX];
-  uint64_t pos = PATH_MAX - 1;
-  path[pos] = '\0';
-  auto dir = t->process->get_cwd();
-  while (dir->number != impl::fs->root->number) {
-    auto parent = co_await impl::fs->find(dir, "..");
-    if (parent.error) co_return parent.error;
-    auto entry = co_await parent.file->entry_it([number = dir->number](DirectoryEntryHeader *e, uint32_t) {
-      return e->inode == number;
-    });
-    if (entry == nullptr) co_return Syscall::ENOENT;
-    uint64_t len = entry->name_length_low;
-    if (pos < len + 1) co_return Syscall::ENAMETOOLONG;
-    pos -= len;
-    memcpy(path + pos, entry.operator->() + 1, len);
-    path[--pos] = '/';
-    dir = parent.file;
-  }
-  if (pos == PATH_MAX - 1) path[--pos] = '/';
-  uint64_t len = PATH_MAX - pos;
-  if (size < len) co_return Syscall::ERANGE;
-  if (!write_user(buf, path + pos, len)) co_return Syscall::EFAULT;
-  co_return len;
+  UniqueRef<Path> path{new Path};
+  int64_t len = co_await vfs::path_of(t->process->get_cwd(), path->bytes, PATH_MAX);
+  if (len < 0) co_return len;
+  if (size < uint64_t(len) + 1) co_return Syscall::ERANGE;
+  if (!write_user(buf, path->bytes, len + 1)) co_return Syscall::EFAULT;
+  co_return len + 1;
 }
 
 // copies a NULL-terminated array of NUL-terminated user strings (argv/envp) into kernel memory
@@ -528,34 +512,30 @@ sync<uint64_t> dispatch(TCB *t) {
     if (auto error = copy_path(path, pathname->bytes)) co_return error;
     path = pathname->bytes;
 
-    bool read = (flags & 0b11) != Syscall::O_WRONLY;
-    bool write = (flags & 0b11) != Syscall::O_RDONLY;
+    UniqueRef<vfs::Lookup> found{new vfs::Lookup};
+    vfs::Lookup &lookup = *found.operator->();
+    bool create = flags & Syscall::O_CREAT;
+    bool exclusive = create && (flags & Syscall::O_EXCL);
+    uint32_t follow = (flags & Syscall::O_NOFOLLOW) || exclusive ? 0 : vfs::FOLLOW;
+    int64_t error = co_await vfs::resolve(t->process.operator->(), dir_fd, path, follow, lookup);
 
-    StrongRef<Node> dir = t->process->get_cwd();
-    if (path[0] != '/' && dir_fd != Syscall::AT_FDCWD) {
-      auto file = t->process->fd_table.get(dir_fd);
-      if (file == nullptr) co_return Syscall::EBADF;
-      dir = file->node();
-      if (dir == nullptr) co_return Syscall::ENOTDIR;
+    if (create) {
+      if (error == 0 && exclusive) co_return Syscall::EEXIST;
+      if (error == Syscall::ENOENT && !lookup.parent.empty()) {
+        if (lookup.must_be_dir) co_return Syscall::EISDIR;
+        if (lookup.parent.node == nullptr) co_return Syscall::EACCES;
+        auto made = co_await impl::fs->create(lookup.parent.node, lookup.name, mode);
+        if (made.error) co_return made.error;
+        lookup.found = vfs::Location{made.file, {}};
+        error = 0;
+      }
     }
+    if (error) co_return error;
+    if ((flags & Syscall::O_NOFOLLOW) && co_await vfs::is_symlink(lookup.found)) co_return Syscall::ELOOP;
 
-    auto res = co_await impl::fs->find(dir, path, !(flags & Syscall::O_NOFOLLOW));
-
-    if (flags & Syscall::O_CREAT) {
-      if (res.error == Syscall::ENOENT) {
-        res = co_await impl::fs->create(dir, path, mode);
-      } else if (res.error == 0 && flags & Syscall::O_EXCL) co_return Syscall::EEXIST;
-    }
-    if (res.error) co_return res.error;
-    StrongRef<Node> file = res.file;
-    if ((flags & Syscall::O_NOFOLLOW) && co_await file->is_symlink()) co_return Syscall::ELOOP;
-    if (write && co_await file->is_dir()) co_return Syscall::EISDIR; // can't write to a directory file
-    if (flags & Syscall::O_DIRECTORY && !co_await file->is_dir()) co_return Syscall::ENOTDIR; // can't write to a directory file
-
-    if (flags & Syscall::O_TRUNC) co_await VMM::truncate_file(file, 0);
-
-    co_return t->process->fd_table.open(StrongRef<impl::OpenFile>{new impl::SeekingFile(file, read, write,
-      flags & Syscall::O_STATUS_FLAGS)}, flags & Syscall::O_CLOEXEC);
+    StrongRef<impl::OpenFile> file{};
+    if (int64_t e = co_await vfs::open(lookup.found, flags, file)) co_return e;
+    co_return t->process->fd_table.open(file, flags & Syscall::O_CLOEXEC);
   }
   case Syscall::DUP:
     co_return t->process->fd_table.dup_min(c.rdi, 0, false);
@@ -678,12 +658,14 @@ sync<uint64_t> dispatch(TCB *t) {
     if (auto error = copy_path(path, pathname->bytes)) co_return error;
     path = pathname->bytes;
 
-    auto res = co_await impl::fs->find(t->process->get_cwd(), path);
-    if (res.error) co_return res.error;
+    UniqueRef<vfs::Lookup> found{new vfs::Lookup};
+    vfs::Lookup &lookup = *found.operator->();
+    if (int64_t error = co_await vfs::resolve(t->process.operator->(), Syscall::AT_FDCWD, path, vfs::FOLLOW, lookup))
+      co_return error;
 
-    if (!co_await res.file->is_dir()) co_return Syscall::ENOTDIR;
+    if (!co_await vfs::is_dir(lookup.found)) co_return Syscall::ENOTDIR;
 
-    t->process->set_cwd(res.file);
+    t->process->set_cwd(lookup.found);
 
     co_return 0;
   }
@@ -741,23 +723,20 @@ sync<uint64_t> dispatch(TCB *t) {
       flags = c.r8;
     }
 
-    if (flags & ~Syscall::AT_SYMLINK_NOFOLLOW) co_return Syscall::EINVAL; // we don't support AT_EMPTY_PATH
+    if (flags & ~(Syscall::AT_SYMLINK_NOFOLLOW | Syscall::AT_EMPTY_PATH)) co_return Syscall::EINVAL;
 
     UniqueRef<Path> pathname{new Path};
-    if (auto error = copy_path(path, pathname->bytes)) co_return error;
+    if (auto error = copy_path(path, pathname->bytes, flags & Syscall::AT_EMPTY_PATH)) co_return error;
     path = pathname->bytes;
 
-    StrongRef<Node> dir = t->process->get_cwd();
-    if (path[0] != '/' && dir_fd != Syscall::AT_FDCWD) {
-      auto file = t->process->fd_table.get(dir_fd);
-      if (file == nullptr) co_return Syscall::EBADF;
-      dir = file->node();
-      if (dir == nullptr) co_return Syscall::ENOTDIR;
-    }
-
-    auto res = co_await impl::fs->find(dir, path, !(flags & Syscall::AT_SYMLINK_NOFOLLOW));
-    if (res.error) co_return res.error;
-    if (!co_await res.file->is_file()) co_return Syscall::EACCES;
+    UniqueRef<vfs::Lookup> found{new vfs::Lookup};
+    vfs::Lookup &lookup = *found.operator->();
+    uint32_t how = (flags & Syscall::AT_SYMLINK_NOFOLLOW ? 0 : vfs::FOLLOW) |
+                   (flags & Syscall::AT_EMPTY_PATH ? vfs::EMPTY_PATH : 0);
+    if (int64_t error = co_await vfs::resolve(t->process.operator->(), dir_fd, path, how, lookup)) co_return error;
+    if (lookup.found.empty()) co_return Syscall::EACCES;
+    if (co_await vfs::is_symlink(lookup.found)) co_return Syscall::ELOOP;
+    if (!co_await vfs::is_file(lookup.found)) co_return Syscall::EACCES;
 
     char **kargv = copy_strings(argv);
     if (kargv == nullptr) co_return Syscall::EFAULT;
@@ -767,7 +746,7 @@ sync<uint64_t> dispatch(TCB *t) {
       co_return Syscall::EFAULT;
     }
 
-    co_return co_await t->process->exec(t, res.file, kargv, kenvp);
+    co_return co_await t->process->exec(t, lookup.found.node, kargv, kenvp);
   }
   default:
     KPRINT("ENOSYS: syscall ? (pid ? tid ?) rip ? args ? ? ? ? ? ?\n",

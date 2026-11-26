@@ -3,6 +3,7 @@
 #include <algorithm>
 
 #include "filesystem/ext2.h"
+#include "filesystem/vfs.h"
 #include "memory/vmm.h"
 
 namespace impl {
@@ -79,6 +80,7 @@ sync<int64_t> OpenFile::fsync() { co_return Syscall::EINVAL; }
 sync<int64_t> OpenFile::truncate(uint64_t) { co_return Syscall::EINVAL; }
 
 StrongRef<Node> OpenFile::node() { return {}; }
+StrongRef<vfs::PseudoNode> OpenFile::pseudo() { return {}; }
 
 uint32_t OpenFile::poll_ready() {
   return (rd ? POLLIN | POLLRDNORM : 0) | (wr ? POLLOUT | POLLWRNORM : 0);

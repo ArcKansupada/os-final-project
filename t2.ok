@@ -1,0 +1,88 @@
+*** t2 start
+ok: an absolute path
+ok: a relative path
+ok: repeated slashes
+ok: . and ..
+ok: .. at the root stays at the root
+ok: a file with a trailing slash fails with ENOTDIR
+ok: a file in the middle of a path fails with ENOTDIR
+ok: a missing file fails with ENOENT
+ok: a missing directory fails with ENOENT
+ok: an empty path fails with ENOENT
+ok: a 256-byte name fails with ENAMETOOLONG
+ok: a 255-byte name is just missing
+ok: a directory with a trailing slash and O_DIRECTORY
+ok: O_DIRECTORY on a file fails with ENOTDIR
+ok: writing a directory fails with EISDIR
+ok: a relative symlink
+ok: an absolute symlink
+ok: a symlink in the middle of a path
+ok: a symlink then more directories
+ok: a symlink to ../
+ok: a symlink too long to live in the inode
+ok: a symlink to a symlink
+ok: a symlink loop fails with ELOOP
+ok: a symlink to itself fails with ELOOP
+ok: a dangling symlink fails with ENOENT
+ok: O_NOFOLLOW on a symlink fails with ELOOP
+ok: a symlink to a directory with a trailing slash
+ok: a symlink to a file with a trailing slash fails with ENOTDIR
+ok: a symlink into /dev
+ok: O_CREAT in a subdirectory
+ok: the new file is there
+ok: O_EXCL on it fails with EEXIST
+ok: O_CREAT in a missing directory fails with ENOENT
+ok: O_CREAT with a trailing slash fails with EISDIR
+ok: O_CREAT in /dev fails with EACCES
+ok: O_CREAT through a dangling symlink
+ok: it created the symlink's target
+ok: O_CREAT | O_EXCL doesn't follow a final symlink
+ok: openat with a directory fd
+ok: openat with .. from a directory fd
+ok: openat with an absolute path ignores the directory fd
+ok: openat with AT_FDCWD
+ok: openat with an absolute path ignores a bad fd
+ok: openat with a bad fd fails with EBADF
+ok: openat with a file as the directory fails with ENOTDIR
+ok: write to /dev/null
+ok: read from /dev/null is the end of the file
+ok: lseek on /dev/null
+ok: /dev/null isn't a terminal
+ok: read from /dev/zero
+ok: one big read from /dev/zero fills it
+ok: mmap of /dev/zero is zeroes
+ok: and writable
+ok: open /dev as a directory
+ok: read of /dev fails with EISDIR
+ok: openat from /dev
+ok: openat with .. from /dev leaves it
+ok: /dev/.. is the root
+ok: a missing device fails with ENOENT
+ok: a device in the middle of a path fails with ENOTDIR
+ok: writing /dev fails with EISDIR
+ok: O_DIRECTORY on a device fails with ENOTDIR
+ok: /dev hides the disk's own /dev
+ok: /proc is a directory
+ok: a missing /proc file fails with ENOENT
+ok: getcwd starts at /
+ok: chdir to a subdirectory
+ok: chdir again
+ok: chdir ../..
+ok: chdir into /dev
+ok: a child inherits the /dev working directory
+ok: chdir .. out of /dev
+ok: chdir to a file fails with ENOTDIR
+ok: chdir to a missing directory fails with ENOENT
+ok: chdir through a symlink
+ok: getcwd into a small buffer fails with ERANGE
+ok: chdir /
+ok: execve of a device fails with EACCES
+ok: execve of a directory fails with EACCES
+ok: execve of a missing file fails with ENOENT
+ok: execveat with AT_SYMLINK_NOFOLLOW on a symlink fails with ELOOP
+ok: execveat with an empty path fails with ENOENT
+ok: execveat AT_EMPTY_PATH of a device fails with EACCES
+ok: execve through a symlink
+ok: execveat from a directory fd
+ok: execveat with AT_EMPTY_PATH
+*** t2 passed

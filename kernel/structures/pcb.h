@@ -28,6 +28,7 @@
 #include "async/event.h"
 #include "io/console.h"
 #include "io/open_file.h"
+#include "filesystem/vfs.h"
 #include "memory/vmm.h"
 
 namespace impl
@@ -651,13 +652,13 @@ struct PCB {
 
 private:
     SpinLock cwd_lock;
-    StrongRef<Node> cwd;
+    vfs::Location cwd;
 public:
-    StrongRef<Node> get_cwd() {
+    vfs::Location get_cwd() {
         LockGuard g{cwd_lock};
         return cwd;
     }
-    void set_cwd(StrongRef<Node> dir) {
+    void set_cwd(vfs::Location dir) {
         LockGuard g{cwd_lock};
         cwd = dir;
     }

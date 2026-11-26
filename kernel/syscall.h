@@ -88,6 +88,7 @@ constexpr uint64_t O_NOATIME    = 01000000;
 constexpr uint64_t O_CLOEXEC    = 02000000;
 constexpr uint64_t O_NONBLOCK   = 00004000;
 constexpr uint64_t O_ASYNC      = 00020000;
+constexpr uint64_t O_ACCMODE    = 00000003;
 
 constexpr uint64_t O_STATUS_FLAGS = O_APPEND | O_NONBLOCK | O_NOATIME | O_DIRECT | O_ASYNC;
 
@@ -159,9 +160,11 @@ constexpr uint64_t CLONE_CHILD_CLEARTID = 0x200000;
 constexpr int64_t EPERM = -1;
 constexpr int64_t ENOENT = -2;
 constexpr int64_t ESRCH = -3;
+constexpr int64_t ENXIO = -6;
 constexpr int64_t EBADF = -9;
 constexpr int64_t ECHILD = -10;
 constexpr int64_t EAGAIN = -11;
+constexpr int64_t ENOMEM = -12;
 constexpr int64_t EACCES = -13;
 constexpr int64_t EFAULT = -14;
 constexpr int64_t EEXIST = -17;
